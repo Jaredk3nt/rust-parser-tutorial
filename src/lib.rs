@@ -202,3 +202,115 @@ fn zero_or_more_combinator() {
   assert_eq!(Ok(("ahah", vec![])), parser.parse("ahah"));
   assert_eq!(Ok(("", vec![])), parser.parse(""));
 }
+
+pub fn n_or_more<'a, P, A>(parser: P, bound: i32) -> impl Parser<'a, Vec<A>>
+where
+  P: Parser<'a, A>,
+{
+  move |mut input| {
+    let mut result = Vec::new();
+    let mut count = 0;
+    while count < bound {
+      if let Ok((next_input, first_item)) = parser.parse(input) {
+        input = next_input;
+        result.push(first_item);
+        count += 1;
+      } else {
+        return Err(input);
+      }
+    }
+
+    while let Ok((next_input, next_item)) = parser.parse(input) {
+      input = next_input;
+      result.push(next_item);
+    }
+
+    Ok((input, result))
+  }
+}
+
+#[test]
+fn n_or_more_combinator() {
+  let parser_of_2 = n_or_more(match_literal("ha"), 2);
+  assert_eq!(Ok(("", vec![(), (), ()])), parser_of_2.parse("hahaha"));
+  assert_eq!(Ok((" wow", vec![(), ()])), parser_of_2.parse("haha wow"));
+  assert_eq!(Err("ahah"), parser_of_2.parse("ahah"));
+  assert_eq!(Err(""), parser_of_2.parse(""));
+
+  let parser_of_0 = n_or_more(match_literal("ha"), 0);
+  assert_eq!(Ok(("", vec![(), (), ()])), parser_of_0.parse("hahaha"));
+  assert_eq!(Ok(("ahah", vec![])), parser_of_0.parse("ahah"));
+  assert_eq!(Ok(("", vec![])), parser_of_0.parse(""));
+}
+
+// My attempts to try and come up with something for a range based combinator
+// pub fn range_combinator<'a, P, A, R, N>(parser: P, range: R) -> impl Parser<'a, Vec<A>>
+// where
+//   P: Parser<'a, A>,
+//   R: RangeBounds<N>,
+// {
+//   let mut count = 0;
+//   let start = range.start_bound();
+//   let end = range.end_bound();
+
+//   move |mut input| {
+//     let mut result = Vec::new();
+
+//     while count < start {
+//       if let Ok((next_input, first_item)) = parser.parse(input) {
+//         input = next_input;
+//         result.push(first_item);
+//       } else {
+//         return Err(input);
+//       }
+//     }
+
+//     while let Ok((next_input, next_item)) = parser.parse(input) {
+//       input = next_input;
+//       result.push(next_item);
+//     }
+
+//     Ok((input, result))
+//   }
+// }
+
+pub fn any_char(input: &str) -> ParseResult<char> {
+  match input.chars().next() {
+    Some(next) => Ok((&input[next.len_utf8()..], next)),
+    _ => Err(input),
+  }
+}
+
+pub fn pred<'a, P, A, F>(parser: P, predicate: F) -> impl Parser<'a, A>
+where
+  P: Parser<'a, A>,
+  F: Fn(&A) -> bool,
+{
+  move |input| {
+    if let Ok((next_input, value)) = parser.parse(input) {
+      if predicate(&value) {
+        return Ok((next_input, value));
+      }
+    }
+    Err(input)
+  }
+}
+
+#[test]
+fn predicate_combinator() {
+  let parser = pred(any_char, |c| *c == 'o');
+  assert_eq!(Ok(("mg", 'o')), parser.parse("omg"));
+  assert_eq!(Err("lol"), parser.parse("lol"));
+}
+
+pub fn whitespace_char<'a>() -> impl Parser<'a, char> {
+  pred(any_char, |c| c.is_whitespace())
+}
+
+pub fn one_or_more_whitespace<'a>() -> impl Parser<'a, Vec<char>> {
+  one_or_more(whitespace_char())
+}
+
+pub fn zero_or_more_whitespace<'a>() -> impl Parser<'a, Vec<char>> {
+  zero_or_more(whitespace_char())
+}
