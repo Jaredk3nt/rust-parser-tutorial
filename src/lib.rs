@@ -1,4 +1,20 @@
-// Based on this tutorial on parsers in rust -> https://bodil.lol/parser-combinators/
+// Based on this tutorial on parsers in rust -> https://bodil.lol/parser-pairs/
+
+type ParseResult<'a, Output> = Result<(&'a str, Output), &'a str>;
+
+pub trait Parser<'a, Output> {
+  fn parse(&self, input: &'a str) -> ParseResult<'a, Output>;
+}
+
+// Implement Parser trait for functions with signature as follows
+impl<'a, F, Output> Parser<'a, Output> for F
+where
+  F: Fn(&'a str) -> ParseResult<Output>,
+{
+  fn parse(&self, input: &'a str) -> ParseResult<'a, Output> {
+    self(input)
+  }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Element {
@@ -7,9 +23,10 @@ struct Element {
   children: Vec<Element>,
 }
 
-pub fn match_literal(expected: &'static str) -> impl Fn(&str) -> Result<(&str, ()), &str> {
+// Match literal to parse a single char
+pub fn match_literal<'a>(expected: &'static str) -> impl Parser<'a, ()> {
   // Create closure that takes input str slice
-  move |input| match input.get(0..expected.len()) {
+  move |input: &'a str| match input.get(0..expected.len()) {
     // If found char as next return remaining str slice
     Some(next) if next == expected => Ok((&input[expected.len()..], ())),
     _ => Err(input),
@@ -19,12 +36,13 @@ pub fn match_literal(expected: &'static str) -> impl Fn(&str) -> Result<(&str, (
 #[test]
 fn literal_parser() {
   let parse_joe = match_literal("A");
-  assert_eq!(Ok(("", ())), parse_joe("A"));
-  assert_eq!(Ok((" B", ())), parse_joe("A B"));
-  assert_eq!(Err("B"), parse_joe("B"));
+  assert_eq!(Ok(("", ())), parse_joe.parse("A"));
+  assert_eq!(Ok((" B", ())), parse_joe.parse("A B"));
+  assert_eq!(Err("B"), parse_joe.parse("B"));
 }
 
-pub fn identifier(input: &str) -> Result<(&str, String), &str> {
+// Identifier to create a parser based on an input
+pub fn identifier(input: &str) -> ParseResult<String> {
   let mut matched = String::new();
   let mut chars = input.chars();
   // Ensure identifier starts with alpha
@@ -58,35 +76,129 @@ fn identifier_parser() {
   assert_eq!(Err("!not identifier"), identifier("!not identifier"));
 }
 
-pub fn combinator<P1, P2, R1, R2>(
-  parser1: P1,
-  parser2: P2,
-) -> impl Fn(&str) -> Result<(&str, (R1, R2)), &str>
+// Combinator for creating custom parsers from two others
+pub fn pair<'a, P1, P2, R1, R2>(parser1: P1, parser2: P2) -> impl Parser<'a, (R1, R2)>
 where
-  P1: Fn(&str) -> Result<(&str, R1), &str>,
-  P2: Fn(&str) -> Result<(&str, R2), &str>,
+  P1: Parser<'a, R1>,
+  P2: Parser<'a, R2>,
 {
-  // Create a closure that takes an input str slice
-  move |input| match parser1(input) {
-    // If okay match on parser1 parse with parser2
-    Ok((next_input, result1)) => match parser2(next_input) {
-      // If okay match on parser2 return both successful matches
-      Ok((final_input, result2)) => Ok((final_input, (result1, result2))),
-      // Return error from parser2
-      Err(err) => Err(err),
-    },
-    // Return error from parser1
-    Err(err) => Err(err),
+  // Create a move closure that takes an input string (is a parser)
+  move |input| {
+    // It calls the parse function impl on the first parser
+    parser1.parse(input).and_then(|(next_input, result1)| {
+      // If Ok call call the second parsers parse function
+      parser2
+        .parse(next_input)
+        // Map the output tuple to the required return type
+        .map(|(last_input, result2)| (last_input, (result1, result2)))
+    })
   }
 }
 
 #[test]
-fn combinator_parser() {
-  let tag_opener = combinator(match_literal("<"), identifier);
+fn pair_parser() {
+  let tag_opener = pair(match_literal("<"), identifier);
   assert_eq!(
     Ok(("/>", ((), "my-first-element".to_string()))),
-    tag_opener("<my-first-element/>")
+    tag_opener.parse("<my-first-element/>")
   );
-  assert_eq!(Err("oops"), tag_opener("oops"));
-  assert_eq!(Err("!oops"), tag_opener("<!oops"));
+  assert_eq!(Err("oops"), tag_opener.parse("oops"));
+  assert_eq!(Err("!oops"), tag_opener.parse("<!oops"));
+}
+
+// Map pair to modify results
+pub fn map<'a, P, F, A, B>(parser: P, map_fn: F) -> impl Parser<'a, B>
+where
+  P: Parser<'a, A>,
+  F: Fn(A) -> B,
+{
+  move |input| {
+    parser
+      .parse(input)
+      .map(|(next_input, result)| (next_input, map_fn(result)))
+  }
+}
+
+// Left functor that allows us to create a function out of an input with a modified return value, of the left of a tuple
+pub fn left<'a, P1, P2, R1, R2>(parser1: P1, parser2: P2) -> impl Parser<'a, R1>
+where
+  P1: Parser<'a, R1>,
+  P2: Parser<'a, R2>,
+{
+  map(pair(parser1, parser2), |(left, _right)| left)
+}
+
+// Right functor that allows us to create a function out of an input with a modified return value of the right of a tuple
+pub fn right<'a, P1, P2, R1, R2>(parser1: P1, parser2: P2) -> impl Parser<'a, R2>
+where
+  P1: Parser<'a, R1>,
+  P2: Parser<'a, R2>,
+{
+  map(pair(parser1, parser2), |(_left, right)| right)
+}
+
+#[test]
+fn right_combinator() {
+  let tag_opener = right(match_literal("<"), identifier);
+  assert_eq!(
+    Ok(("/>", "my-first-element".to_string())),
+    tag_opener.parse("<my-first-element/>")
+  );
+  assert_eq!(Err("oops"), tag_opener.parse("oops"));
+  assert_eq!(Err("!oops"), tag_opener.parse("<!oops"));
+}
+
+pub fn one_or_more<'a, P, A>(parser: P) -> impl Parser<'a, Vec<A>>
+where
+  P: Parser<'a, A>,
+{
+  move |mut input| {
+    let mut result = Vec::new();
+
+    if let Ok((next_input, first_item)) = parser.parse(input) {
+      input = next_input;
+      result.push(first_item);
+    } else {
+      return Err(input);
+    }
+
+    while let Ok((next_input, next_item)) = parser.parse(input) {
+      input = next_input;
+      result.push(next_item);
+    }
+
+    Ok((input, result))
+  }
+}
+
+#[test]
+fn one_or_more_combinator() {
+  let parser = one_or_more(match_literal("ha"));
+  assert_eq!(Ok(("", vec![(), (), ()])), parser.parse("hahaha"));
+  assert_eq!(Err("ahah"), parser.parse("ahah"));
+  assert_eq!(Err(""), parser.parse(""));
+}
+
+pub fn zero_or_more<'a, P, A>(parser: P) -> impl Parser<'a, Vec<A>>
+where
+  P: Parser<'a, A>,
+{
+  move |mut input| {
+    let mut result = Vec::new();
+
+    while let Ok((next_input, next_item)) = parser.parse(input) {
+      input = next_input;
+      result.push(next_item);
+    }
+
+    Ok((input, result))
+  }
+}
+
+#[test]
+fn zero_or_more_combinator() {
+  let parser = zero_or_more(match_literal("ha"));
+  assert_eq!(Ok(("", vec![(), (), ()])), parser.parse("hahaha"));
+  assert_eq!(Ok(("ahah", vec![])), parser.parse("ahah"));
+  assert_eq!(Ok(("", vec![])), parser.parse(""));
 }
